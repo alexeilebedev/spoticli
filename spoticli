@@ -1,0 +1,117 @@
+#!/usr/local/bin/perl
+use strict;
+my $kclient_id = "client_id";
+my $kresponse = "response.html";
+my $kclient_secret = "client_secret";
+my $kclient_auth_code = "client_auth_code";
+my $STATE="";
+# this address is fake, and that's the idea
+my $REDIRECT="http://localhost:12345";
+my $verbose=1 if $ENV{VERBOSE};
+
+#--------------------------------------------------------------------------------
+# print shell command(s) and execute using system()
+# return value: exit code from command
+sub syscmd(@) {
+    print join(" ",map { "'$_'" } @_), "\n" if $verbose;
+    return system(@_);
+}
+
+#--------------------------------------------------------------------------------
+# persistent set key:$_[0] to value $_[1]
+# return value: status code
+sub pset($$) {
+    open(my $fh, '>', $_[0]);
+    print $fh $_[1];
+    print "set $_[0] = $_[1]\n" if $verbose;
+    return close $fh;
+}
+
+#--------------------------------------------------------------------------------
+# delete persistent value
+sub pdel($) {
+    unlink($_[0]);
+    print "del $_[0]\n" if $verbose;
+}
+
+#--------------------------------------------------------------------------------
+# persistent get value for key:$_[0]
+sub pget($) {
+    local $/ = undef;
+    my $ret;
+    if (open my $fh, "<", $_[0]) {
+	$ret = <$fh>;
+    }
+    print "get $_[0] = $ret\n" if $verbose;
+    return $ret;
+}
+
+#--------------------------------------------------------------------------------
+
+# log in our app
+sub login() {
+    my $client_id = pget($kclient_id);
+    my $SCOPE="user-read-private,streaming,app-remote-control,user-read-currently-playing,user-modify-playback-state,user-read-playback-state,user-library-read,user-library-modify,user-top-read,user-read-recently-played";
+    my $url="https://accounts.spotify.com/authorize/?client_id=$client_id&response_type=code&redirect_uri=$REDIRECT&scope=$SCOPE&state=$STATE";
+    # can't use curl -- spotify presents a cloudfront
+    # bot protector page, which can only be handled in the browser, as far as i know
+    # so we use the browser, and set up a little server using nc to capture
+    # the response.
+    system(q%
+echo "HTTP/1.1 200 OK\n\n Login Successful\n" | nc -l 12345 > % . $kresponse .q% &
+pid=$!
+open '% . $url . q%'  ## using curl during login presents cloudfront protections
+sleep 2
+kill $(jobs -p) 2>/dev/null ## kill all remaining jobs -- ignore errors
+%);
+    foreach my $line (split(/\n/,pget($kresponse))) {
+	# match GET /?code=AQD...BumA&state= HTTP/1.1
+	if ($line =~ /^GET .*\?code=(.*?)&.*HTTP/) {
+	    pset($kclient_auth_code,$1);
+	}
+    }
+    pdel($kresponse);
+}
+
+#--------------------------------------------------------------------------------
+
+sub getcode() {
+    my $client_secret=pget($kclient_secret);
+    my $client_id = pget($kclient_id);
+    syscmd("curl", "https://accounts.spotify.com/authorize/?client_id=$client_id&client_secret=$client_secret&grant_type=authorization_code&response_type=code&redirect_uri=$REDIRECT&state=$STATE");
+}
+
+#--------------------------------------------------------------------------------
+
+sub gettoken() {
+    use MIME::Base64;
+    my $client_secret=pget($kclient_secret);
+    my $client_id=pget($kclient_id);
+    my $client_auth_code=pget($kclient_auth_code);
+    my $encoded = encode_base64('$client_id:$client_code');
+    chomp $encoded;
+    syscmd("curl", "-H", "Authorization: Basic $encoded"
+	   , "-d", "client_id=$client_id"
+	   , "-d", "client_secret=$client_secret"
+	   , "-d", "grant_type=authorization_code"
+	   , "-d", "code=".pget("spotify_code")
+	   , "-d", "redirect_uri=$REDIRECT"
+	   , "https://accounts.spotify.com/api/token");
+}
+
+my %verbs = ( 
+    "login" => \&login
+	, "getcode" => \&getcode
+	, "gettoken" => \&gettoken
+);
+my $verb=shift @ARGV;
+my $usage="$0 [" . join(" | ", keys %verbs) . "]";
+
+if (defined($verbs{$verb})) {
+    $verbs{$verb}->();
+} else {
+    print "$usage\n";
+    exit 1;
+}
+
+print stderr "";
