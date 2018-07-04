@@ -1,117 +1,322 @@
 #!/usr/local/bin/perl
+binmode STDOUT, ":utf8";
+use utf8;
+use Encode qw(encode_utf8);
+use constant false => \0;
+use MIME::Base64;
+use File::Basename;
+use warnings;
 use strict;
-my $kclient_id = "client_id";
-my $kresponse = "response.html";
-my $kclient_secret = "client_secret";
-my $kclient_auth_code = "client_auth_code";
-my $STATE="";
-# this address is fake, and that's the idea
-my $REDIRECT="http://localhost:12345";
+my $thisdir=dirname($0);
+require "$thisdir/lib.pl";
+require "$thisdir/sfy.pl";
+use JSON qw(decode_json to_json);
+my $exit_code=0;
+my %playlists; # global list of playlists...
 my $verbose=1 if $ENV{VERBOSE};
 
 #--------------------------------------------------------------------------------
-# print shell command(s) and execute using system()
-# return value: exit code from command
-sub syscmd(@) {
-    print join(" ",map { "'$_'" } @_), "\n" if $verbose;
-    return system(@_);
-}
-
-#--------------------------------------------------------------------------------
-# persistent set key:$_[0] to value $_[1]
-# return value: status code
-sub pset($$) {
-    open(my $fh, '>', $_[0]);
-    print $fh $_[1];
-    print "set $_[0] = $_[1]\n" if $verbose;
-    return close $fh;
-}
-
-#--------------------------------------------------------------------------------
-# delete persistent value
-sub pdel($) {
-    unlink($_[0]);
-    print "del $_[0]\n" if $verbose;
-}
-
-#--------------------------------------------------------------------------------
-# persistent get value for key:$_[0]
-sub pget($) {
-    local $/ = undef;
-    my $ret;
-    if (open my $fh, "<", $_[0]) {
-	$ret = <$fh>;
-    }
-    print "get $_[0] = $ret\n" if $verbose;
-    return $ret;
-}
-
-#--------------------------------------------------------------------------------
-
 # log in our app
-sub login() {
-    my $client_id = pget($kclient_id);
-    my $SCOPE="user-read-private,streaming,app-remote-control,user-read-currently-playing,user-modify-playback-state,user-read-playback-state,user-library-read,user-library-modify,user-top-read,user-read-recently-played";
-    my $url="https://accounts.spotify.com/authorize/?client_id=$client_id&response_type=code&redirect_uri=$REDIRECT&scope=$SCOPE&state=$STATE";
-    # can't use curl -- spotify presents a cloudfront
-    # bot protector page, which can only be handled in the browser, as far as i know
-    # so we use the browser, and set up a little server using nc to capture
-    # the response.
-    system(q%
-echo "HTTP/1.1 200 OK\n\n Login Successful\n" | nc -l 12345 > % . $kresponse .q% &
-pid=$!
-open '% . $url . q%'  ## using curl during login presents cloudfront protections
-sleep 2
-kill $(jobs -p) 2>/dev/null ## kill all remaining jobs -- ignore errors
-%);
-    foreach my $line (split(/\n/,pget($kresponse))) {
-	# match GET /?code=AQD...BumA&state= HTTP/1.1
-	if ($line =~ /^GET .*\?code=(.*?)&.*HTTP/) {
-	    pset($kclient_auth_code,$1);
+
+sub cmd_login() {
+    if (!sfy_login()) {
+	$exit_code=1;
+    }
+}
+
+#--------------------------------------------------------------------------------
+
+sub status_devices() {
+    my $resp=sfy_api_req_retry("v1/me/player/devices","GET");
+    my $devices =$resp->{devices};
+    foreach my $device (@$devices) {
+	my $line= "device  name:'$device->{name}'  type:'$device->{type}'";
+	# include volume on active device
+	if ($device->{is_active}) {
+	    $line .= "  volume:$device->{volume_percent}";
+	}
+	print "$line\n";
+    }
+}
+
+sub status_playback() {
+    my $resp=sfy_api_req_retry("v1/me/player/currently-playing","GET");
+    my $progress_ms=$resp->{progress_ms};
+    my $item=$resp->{item};
+    my $duration_ms=$item->{duration_ms};
+    my $item_name=$item->{name};
+    my $album=$item->{album};
+    my $album_name=$album->{name};
+    my $artist=$album->{artists}->[0];
+    my $artist_name=$artist->{name};
+    my $progress=int($progress_ms * 100 / ($duration_ms || 1));
+    print "status  progress:$progress\%  item_name:'$item_name'  album_name:'$album_name'  artist:'$artist_name'\n";
+}
+
+sub status_user() {
+    my $resp=sfy_api_req_retry("v1/me","GET");
+    print "user  id:$resp->{id}  product:$resp->{product}\n";
+}
+
+sub cmd_status() {
+    status_devices();
+    status_playback();
+    status_user();
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_next() {
+    sfy_api_req_retry("v1/me/player/next","POST");
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_prev() {
+    sfy_api_req_retry("v1/me/player/previous","POST");
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_seek() {
+    my $msec=int((shift @ARGV)*1000);
+    sfy_api_req_retry("v1/me/player/seek?position_ms=$msec","PUT");
+}
+
+#--------------------------------------------------------------------------------
+
+# $_[0] -> json object containing tracks
+# returns: sorted list of tracks
+sub get_tracks($) {
+    my $tracks=$_[0]->{tracks};
+    my @sorted_tracks = sort { $a->{playlist_index} cmp $b->{playlist_index} } @$tracks;
+    return @sorted_tracks;
+}
+
+#--------------------------------------------------------------------------------
+
+# first call fetches a list of playlists from Spotify
+# subsequent calls do nothing
+sub populate_playlists() {
+    if (!keys %playlists) {
+	my $resp=sfy_api_req_retry("v1/me/playlists","GET");
+	my $items = $resp->{items};
+	# build a hash by name
+	# there can be 2 playlists with the same name
+	# but this app doesn't care about that
+	foreach my $item(@$items) {
+	    $playlists{$item->{name}}=$item;
 	}
     }
-    pdel($kresponse);
 }
 
 #--------------------------------------------------------------------------------
 
-sub getcode() {
-    my $client_secret=pget($kclient_secret);
-    my $client_id = pget($kclient_id);
-    syscmd("curl", "https://accounts.spotify.com/authorize/?client_id=$client_id&client_secret=$client_secret&grant_type=authorization_code&response_type=code&redirect_uri=$REDIRECT&state=$STATE");
+# create playlist named $_[0]
+# return playlist id
+sub create_playlist($) {
+    populate_playlists();
+    if (!defined($playlists{$_[0]})) {
+	my $reqbody=to_json({name=>$_[0], public=>false}, {pretty=>1});
+	my $resp = sfy_api_req_retry("v1/users/".sfy_user_id()."/playlists", "POST", undef, $reqbody);
+	prerr("create_playlist"
+	      ,keyval("playlist",$_[0])
+	      ,keyval("result",$resp));
+	undef %playlists;
+    }
+    populate_playlists();
+    return $playlists{$_[0]};
 }
 
 #--------------------------------------------------------------------------------
 
-sub gettoken() {
-    use MIME::Base64;
-    my $client_secret=pget($kclient_secret);
-    my $client_id=pget($kclient_id);
-    my $client_auth_code=pget($kclient_auth_code);
-    my $encoded = encode_base64('$client_id:$client_code');
-    chomp $encoded;
-    syscmd("curl", "-H", "Authorization: Basic $encoded"
-	   , "-d", "client_id=$client_id"
-	   , "-d", "client_secret=$client_secret"
-	   , "-d", "grant_type=authorization_code"
-	   , "-d", "code=".pget("spotify_code")
-	   , "-d", "redirect_uri=$REDIRECT"
-	   , "https://accounts.spotify.com/api/token");
+# load file $_[0], containing a list of tracks
+# look up spotify track ids for each record
+# return resulting json object
+sub search_json($) {
+    my $fname=$_[0];
+    print "
+Begin lookup Spotify track ids for $fname...
+";
+    # is this right?? decode utf 8...
+    my $json=sfy_decode_json(encode_utf8(pget($fname)));
+    my $ngood=0;
+    my $ntotal=0;
+    foreach my $track (get_tracks($json)) {
+	my $previd=$track->{id};
+	if (!$track->{id}) {
+	    my $item=sfy_find_taa_clever($track->{title},$track->{album},$track->{artist});
+	    if ($item) {
+		$track->{id}=$item->{id};
+	    }
+	}
+	$ntotal++;
+	if ($track->{id}) {
+	    # don't print it if the ID was already known
+	    print "    $track->{track}\n" if !$previd;
+	    $ngood++;
+	} else {
+	    prlog("    "
+		  ,keyval("title",$track->{title})
+		  ,keyval("album",$track->{album})
+		  ,keyval("artist",$track->{artist})
+		  ,keyval("comment","Track not found in Spotify"));
+	}
+    }
+    print "End  total_tracks:$ntotal  found:$ngood
+";
+    return $json;
 }
+    
+#--------------------------------------------------------------------------------
+
+# import a list of tracks sitting in a json file
+sub cmd_import_json() {
+    my $fname=shift @ARGV;
+    -f $fname or die "import_json: filename expected";
+    my $json =search_json($fname);
+    my $ngood=0;
+    my $ntotal=0;
+    print STDERR "
+Begin import tracks from $fname...
+";
+    # sort tracks in playlist index order.
+    foreach my $track (get_tracks($json)) {
+	my $playlist = create_playlist($track->{playlist});
+	$ntotal++;
+	if ($track->{id}) {
+	    # note - always insert at the end
+	    my $resp = sfy_add_track($track->{id},$playlist->{id});
+	    sfy_show_error();
+	    $ngood += sfy_resp_okq($resp);
+	    prlog("    "
+		  ,keyval("track",$track->{track})
+		  ,keyval("response",$resp));
+	    # spotify stumbles on fast adds.
+	    sleep(1);
+	}
+    }
+    print "End import tracks from $fname. Tracks:$ntotal  Imported:$ngood
+";
+}
+
+#--------------------------------------------------------------------------------
+
+# check that all tracks in a given json file are known to Spotify
+sub cmd_search_json() {
+    my $fname=shift @ARGV;
+    -f $fname or die "search_json: filename expected";
+    my $json=search_json($fname);
+    pset($fname,to_json($json,{pretty=>1}));
+    print STDERR "
+File $fname updated to include newly located Spotify track IDs.
+You can invoke this command again to fetch missing track IDs after editing the tracks file.
+"
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_import_goog() {
+    my $regx=(shift @ARGV) || ".*";
+    print STDERR "
+import_goog  regx:'$regx'
+This command attempts to locate Google Play Music playlists obtained using Google Takeout
+   (www.google.com/takeout)
+The command locates a zip file under Downloads, named takeout-*.zip
+It extracts playlists, accepting only those that match REGX, searches for 
+corresponding matches in Spotify, creates corresponding lists, and inserts 
+the tracks into playlists.
+Position of each track withint its playlist is preserved.
+	       ";
+    my $tempfile ="temp/playlist.json";
+    syscmd("$thisdir/goog_playlists.pl $regx > $tempfile");
+    unshift(@ARGV,$tempfile);
+    cmd_import_json();
+}
+
+#--------------------------------------------------------------------------------
+
+# clear temporaries vars
+sub cmd_logout() {
+    sfy_clean();
+}
+    
+#--------------------------------------------------------------------------------
+
+sub cmd_playlists() {
+    populate_playlists();
+    print "playlists: " . join(" ",sort keys %playlists)  . "\n";
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_search() {
+    my $q=shift @ARGV;
+    my $resp=sfy_api_req_retry("v1/search?q=".urlencode($q)."\&type=track","GET");
+    print to_json($resp,{pretty=>1});
+}
+
+#--------------------------------------------------------------------------------
+
+sub cmd_init() {
+    print "Enter Client ID: ";
+    my $id = <STDIN>;
+    chomp $id;
+
+    print "Enter Client Secret: ";
+    my $secret = <STDIN>;
+    chomp $secret;
+    sfy_init($id,$secret);
+}
+
+#--------------------------------------------------------------------------------
 
 my %verbs = ( 
-    "login" => \&login
-	, "getcode" => \&getcode
-	, "gettoken" => \&gettoken
+    "init" => [\&cmd_init, "Enter client ID and client secret"]
+    "login" => [\&cmd_login, "Authenticate with Spotify"]
+	, "logout" => [\&cmd_logout, "Logout from spotify"]
+	, "status" => [\&cmd_status, "Current player status"]
+	, "next" => [\&cmd_next, "Play next track"]
+	, "prev" => [\&cmd_prev, "Play previous track"]
+	, "seek" => [\&cmd_seek, "<time>: seek to specified position in seconds"]
+	, "playlists" => [\&cmd_playlists, "Show playlists"]
+	, "search" => [\&cmd_search, "<query>: Search for a track"]
+	, "import_goog" => [\&cmd_import_goog, "<regx> Import Google Play playlist downloaded via Takeout"]
+	, "import_json" => [\&cmd_import_json, "<jsonfile> Import JSON file containing tracks"]
+	, "search_json" => [\&cmd_search_json, "<jsonfile> Look up all tracks in JSON file via Spotify"]
 );
-my $verb=shift @ARGV;
-my $usage="$0 [" . join(" | ", keys %verbs) . "]";
 
-if (defined($verbs{$verb})) {
-    $verbs{$verb}->();
-} else {
-    print "$usage\n";
-    exit 1;
+#--------------------------------------------------------------------------------
+
+sub do_cmdline() {
+    my $showusage=0;
+    my $nverb=0;
+    while (my $verb =shift @ARGV) {
+	if (defined($verbs{$verb})) {
+	    my $cmd=$verbs{$verb};
+	    $cmd->[0]->();
+	    sfy_show_error(); # if any
+	    $nverb++;
+	} else {
+	    print "unrecognized command: $verb\n";
+	    $showusage=1;
+	}
+    }
+    $showusage=1 if ($nverb==0);    
+    
+    if ($showusage) {
+	print "$0 <command>+\n";
+	print "List of available commands\n";
+	foreach my $cmd (sort keys %verbs) {
+	    my $entry=$verbs{$cmd};
+	    my $desc=$entry->[1];
+	    if ($cmd !~ /^_/ || $verbose) {
+		printf("%-15s %s\n", $cmd, $desc);
+	    }
+	}
+	$exit_code=1;
+    }
 }
 
-print stderr "";
+do_cmdline();
+exit $exit_code;

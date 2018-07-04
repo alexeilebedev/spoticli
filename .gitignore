@@ -2,3 +2,5 @@ client_id
 client_secret
 client_auth_code
 response.html
+client_token
+client_token.json
