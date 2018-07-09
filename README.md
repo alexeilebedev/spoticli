@@ -18,9 +18,8 @@ search_json     <jsonfile> Look up all tracks in JSON file via Spotify
 seek            <time>: seek to specified position in seconds
 status          Current player status
 
----
-THE SHORT WAY
-'
+## THE SHORT WAY
+
 Instructions to port your Google Play Music playlists to spotify:
 1. Download spoticli
 2. Register as an app developer on spotify: developer.spotify.com
@@ -36,8 +35,7 @@ Instructions to port your Google Play Music playlists to spotify:
 If in doubt, read and modify sfy.pl. Since this is a personal project I didn't bother
 much to make a whole framework out of it.
 
----
-THE LONG WAY
+## MORE INFO
 
 Spoticli uses an intermediate format, a file containing a json object with an array
 of track records. In addition, a standalone goog_playlists.pl tool locates Takeout downloads
@@ -53,8 +51,7 @@ and run search_json multiple times. When done, you can run
 
 ./spoticli import_json tracks.json
 
----
-NOTES ON TRACK SEARCHING
+## NOTES ON TRACK MATCHING
 
 This ordeal took, on and off, the whole weekend. During this time I learned that:
 
@@ -80,9 +77,11 @@ This ordeal took, on and off, the whole weekend. During this time I learned that
   this data.
 
 - Sometimes it's Google's fault. In one instance, Google replaced the spanish n~ character with ?
+
+- Google's Takeout format for music, which is one cvs file per track, is truly idiotic.
+  Doesn't really matter with Perl, but it's useless for other applications.
   
----
-EXAMPLES OF MATCHING STRATEGIES
+## EXAMPLES OF MATCHING STRATEGIES
 
 Some examples of the matching strategy at work:
     Found Track After 13 Attempts
@@ -100,3 +99,20 @@ Some examples of the matching strategy at work:
     ORIGINAL QUERY             track:Mis dos peque?as album:Cachaito artist:Cachaito Lopez
     SUCCESSFUL QUERY           track:Mis dos album:Cachaito artist:Cachaito Lopez
     STRATEGY                  remove word containing ? character
+
+## FILES
+
+- lib.pl contains library functions as pget/pset (persistence)
+  and syscmd
+
+- spoticli is the main client. You can specify multiple words on the command line,
+  e.g. ./spoticli next next
+  to skip 2 tracks forward
+
+- You can run VERBOSE=1 ./spoticli if you want to trace all subprocess invocations
+
+- sfy.pl is a simple module implementing all Spotify queries.
+  It supports the track searching strategies.
+  Also implements auto-login in case the token expires.
+
+- goog_playlists.pl is a google play playlist converter
