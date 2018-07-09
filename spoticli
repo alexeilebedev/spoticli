@@ -267,23 +267,24 @@ sub cmd_init() {
     my $secret = <STDIN>;
     chomp $secret;
     sfy_init($id,$secret);
+    cmd_login();
 }
 
 #--------------------------------------------------------------------------------
 
 my %verbs = ( 
     "init" => [\&cmd_init, "Enter client ID and client secret"]
-    "login" => [\&cmd_login, "Authenticate with Spotify"]
-	, "logout" => [\&cmd_logout, "Logout from spotify"]
-	, "status" => [\&cmd_status, "Current player status"]
-	, "next" => [\&cmd_next, "Play next track"]
-	, "prev" => [\&cmd_prev, "Play previous track"]
-	, "seek" => [\&cmd_seek, "<time>: seek to specified position in seconds"]
-	, "playlists" => [\&cmd_playlists, "Show playlists"]
-	, "search" => [\&cmd_search, "<query>: Search for a track"]
-	, "import_goog" => [\&cmd_import_goog, "<regx> Import Google Play playlist downloaded via Takeout"]
-	, "import_json" => [\&cmd_import_json, "<jsonfile> Import JSON file containing tracks"]
-	, "search_json" => [\&cmd_search_json, "<jsonfile> Look up all tracks in JSON file via Spotify"]
+    , "login" => [\&cmd_login, "Authenticate with Spotify"]
+    , "logout" => [\&cmd_logout, "Logout from spotify"]
+    , "status" => [\&cmd_status, "Current player status"]
+    , "next" => [\&cmd_next, "Play next track"]
+    , "prev" => [\&cmd_prev, "Play previous track"]
+    , "seek" => [\&cmd_seek, "<time>: seek to specified position in seconds"]
+    , "playlists" => [\&cmd_playlists, "Show playlists"]
+    , "search" => [\&cmd_search, "<query>: Search for a track"]
+    , "import_goog" => [\&cmd_import_goog, "<regx> Import Google Play playlist downloaded via Takeout"]
+    , "import_json" => [\&cmd_import_json, "<jsonfile> Import JSON file containing tracks"]
+    , "search_json" => [\&cmd_search_json, "<jsonfile> Look up all tracks in JSON file via Spotify"]
 );
 
 #--------------------------------------------------------------------------------
